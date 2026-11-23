@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi2Cash</title>
+<script src="https://sdk.minepi.com/pi-sdk.js"></script>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --txt:#eef0f4; --mut:#9aa3b2; --acc:#8b5cf6; --ok:#34d399; --err:#f87171; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--txt); padding:16px; max-width:480px; margin-inline:auto; }
+  h1 { font-size:22px; margin:4px 0 12px; }
+  .test { background:#3b2a05; color:#fbbf24; border-radius:10px; padding:8px 12px; font-size:13px; margin-bottom:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .card h2 { font-size:15px; margin:0 0 10px; color:var(--mut); font-weight:600; }
+  label { display:block; font-size:13px; color:var(--mut); margin:8px 0 4px; }
+  input, select { width:100%; padding:12px; border-radius:10px; border:1px solid var(--line); background:#0f1115; color:var(--txt); font-size:16px; }
+  button { width:100%; margin-top:10px; padding:13px; border:0; border-radius:10px; background:var(--acc); color:#fff; font-size:16px; font-weight:600; }
+  button:disabled { opacity:.4; }
+  .big { font-size:28px; font-weight:700; }
+  #msg { min-height:20px; font-size:14px; margin:6px 2px; }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+  .hide { display:none; }
+</style>
+</head>
+<body>
+<h1>Pi2Cash</h1>
+<div class="test">Mode test : aucun argent réel n'est envoyé.</div>
+
+<div id="login" class="card">
+  <h2>Connexion</h2>
+  <button id="btnLogin">Se connecter avec Pi</button>
+</div>
+
+<div id="app" class="hide">
+  <div class="card">
+    <h2>Solde de <span id="who"></span></h2>
+    <div class="big"><span id="bal">0</span> FCFA</div>
+  </div>
+
+  <div class="card">
+    <h2>Convertir des Pi en FCFA</h2>
+    <label for="pi">Montant en Pi</label>
+    <input id="pi" type="number" inputmode="decimal" step="0.01" min="0" placeholder="1">
+    <button id="btnQuote">Voir le montant en FCFA</button>
+    <div id="quoteInfo" style="margin-top:10px;color:var(--mut)"></div>
+    <button id="btnPay" disabled>Payer avec Pi</button>
+  </div>
+
+  <div class="card">
+    <h2>Retirer mes FCFA</h2>
+    <label for="channel">Canal</label>
+    <select id="channel">
+      <option value="wave">Wave</option>
+      <option value="orange_money">Orange Money</option>
+      <option value="mtn_momo">MTN MoMo</option>
+      <option value="moov_money">Moov Money</option>
+      <option value="bank">Banque</option>
+    </select>
+    <label for="dest">Numéro (ou IBAN)</label>
+    <input id="dest" inputmode="tel" placeholder="07 00 00 00 00">
+    <label for="amt">Montant en FCFA</label>
+    <input id="amt" type="number" inputmode="numeric" step="1" min="0" placeholder="1000">
+    <button id="btnPayout">Retirer</button>
+  </div>
+</div>
+
+<div id="msg"></div>
+
+<script>
+const SANDBOX = true; // mettre false quand l'application passe en production
+const $ = (id) => document.getElementById(id);
+let token = null, quote = null, incomplete = null;
+
+const fcfa = (x) => Number(x).toLocaleString("fr-FR");
+function msg(t, ok) { const e = $("msg"); e.textContent = t || ""; e.className = ok ? "ok" : "err"; }
+const friendly = (m) => ({
+  "kyc required": "Retrait refusé : une vérification d'identité (KYC) est nécessaire.",
+  "insufficient balance": "Solde insuffisant.",
+  "quote expired or used": "Le montant a expiré, demande-le à nouveau.",
+}[m] || m);
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}), ...(opts.headers || {}) },
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401) throw new Error("Session expirée, reconnecte-toi.");
+  if (!r.ok) throw new Error(friendly(data.message) || "Erreur " + r.status);
+  return data;
+}
+
+async function refreshBalance() {
+  const b = await api("/balance");
+  $("bal").textContent = fcfa(b.xof);
+}
+
+async function login() {
+  if (!window.Pi) return msg("Ouvre cette page dans le Pi Browser.");
+  try {
+    msg("Connexion…", true);
+    const auth = await Pi.authenticate(["username", "payments"], (p) => { incomplete = p; });
+    const r = await api("/auth", { method: "POST", body: JSON.stringify({ accessToken: auth.accessToken }) });
+    token = r.token;
+    $("who").textContent = auth.user.username;
+    $("login").classList.add("hide");
+    $("app").classList.remove("hide");
+    if (incomplete && incomplete.transaction && incomplete.transaction.txid) {
+      await api("/pi/complete", { method: "POST", body: JSON.stringify({ paymentId: incomplete.identifier, txid: incomplete.transaction.txid }) }).catch(() => {});
+    }
+    await refreshBalance();
+    msg("");
+  } catch (e) { msg(e.message || String(e)); }
+}
+
+async function getQuote() {
+  try {
+    const amount = parseFloat($("pi").value);
+    if (!(amount > 0)) return msg("Montant invalide.");
+    quote = await api("/quotes", { method: "POST", body: JSON.stringify({ pi: amount }) });
+    quote.pi = amount;
+    $("quoteInfo").textContent = `${amount} Pi = ${fcfa(quote.xofNet)} FCFA (frais : ${fcfa(quote.xofFee)}). Valable 2 minutes.`;
+    $("btnPay").disabled = false;
+    msg("");
+  } catch (e) { msg(e.message); }
+}
+
+function pay() {
+  if (!quote) return;
+  $("btnPay").disabled = true;
+  Pi.createPayment(
+    { amount: quote.pi, memo: "Conversion Pi vers FCFA", metadata: { quoteId: quote.quoteId } },
+    {
+      onReadyForServerApproval: (id) =>
+        api("/pi/approve", { method: "POST", body: JSON.stringify({ paymentId: id }) }).catch((e) => msg(e.message)),
+      onReadyForServerCompletion: (id, txid) =>
+        api("/pi/complete", { method: "POST", body: JSON.stringify({ paymentId: id, txid }) })
+          .then(() => { msg("Paiement confirmé.", true); quote = null; $("quoteInfo").textContent = ""; return refreshBalance(); })
+          .catch((e) => msg(e.message)),
+      onCancel: () => { msg("Paiement annulé."); },
+      onError: (e) => { msg("Erreur Pi : " + ((e && e.message) || e)); },
+    }
+  );
+}
+
+async function payout() {
+  try {
+    const amountXof = String(Math.trunc(Number($("amt").value)));
+    if (!/^[1-9]\d*$/.test(amountXof)) return msg("Montant invalide.");
+    const r = await api("/payouts", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ channel: $("channel").value, destination: $("dest").value.trim(), amountXof }),
+    });
+    if (r.status === "sent") msg("Retrait envoyé (simulation).", true);
+    else msg("Retrait échoué" + (r.reason ? " : " + r.reason : "") + ". Tes FCFA ont été restitués.");
+    await refreshBalance();
+  } catch (e) { msg(e.message); }
+}
+
+$("btnLogin").onclick = login;
+$("btnQuote").onclick = getQuote;
+$("btnPay").onclick = pay;
+$("btnPayout").onclick = payout;
+if (window.Pi) Pi.init({ version: "2.0", sandbox: SANDBOX });
+</script>
+</body>
+</html>
